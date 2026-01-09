@@ -305,7 +305,7 @@ async def create_features_bulk(project_name: str, bulk: FeatureBulkCreate):
     Create multiple features at once.
 
     Features are assigned sequential priorities starting from:
-    - starting_priority if specified
+    - starting_priority if specified (must be >= 1)
     - max(existing priorities) + 1 if not specified
 
     This is useful for:
@@ -328,18 +328,28 @@ async def create_features_bulk(project_name: str, bulk: FeatureBulkCreate):
     if not bulk.features:
         return FeatureBulkCreateResponse(created=0, features=[])
 
+    # Validate starting_priority if provided
+    if bulk.starting_priority is not None and bulk.starting_priority < 1:
+        raise HTTPException(status_code=400, detail="starting_priority must be >= 1")
+
     _, Feature = _get_db_classes()
 
     try:
         with get_db_session(project_dir) as session:
-            # Determine starting priority
+            # Determine starting priority with row-level lock to prevent race conditions
             if bulk.starting_priority is not None:
                 current_priority = bulk.starting_priority
             else:
-                max_priority_feature = session.query(Feature).order_by(Feature.priority.desc()).first()
+                # Lock the max priority row to prevent concurrent inserts from getting same priority
+                max_priority_feature = (
+                    session.query(Feature)
+                    .order_by(Feature.priority.desc())
+                    .with_for_update()
+                    .first()
+                )
                 current_priority = (max_priority_feature.priority + 1) if max_priority_feature else 1
 
-            created_features = []
+            created_ids = []
 
             for feature_data in bulk.features:
                 db_feature = Feature(
@@ -351,20 +361,16 @@ async def create_features_bulk(project_name: str, bulk: FeatureBulkCreate):
                     passes=False,
                 )
                 session.add(db_feature)
+                session.flush()  # Flush to get the ID immediately
+                created_ids.append(db_feature.id)
                 current_priority += 1
 
             session.commit()
 
-            # Refresh to get IDs and return responses
-            for db_feature in session.query(Feature).order_by(Feature.priority.desc()).limit(len(bulk.features)).all():
-                created_features.insert(0, feature_to_response(db_feature))
-
-            # Re-query to get the actual created features in order
+            # Query created features by their IDs (avoids relying on priority range)
             created_features = []
-            start_priority = current_priority - len(bulk.features)
             for db_feature in session.query(Feature).filter(
-                Feature.priority >= start_priority,
-                Feature.priority < current_priority
+                Feature.id.in_(created_ids)
             ).order_by(Feature.priority).all():
                 created_features.append(feature_to_response(db_feature))
 

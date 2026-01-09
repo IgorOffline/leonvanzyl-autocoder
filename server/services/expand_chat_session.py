@@ -67,6 +67,7 @@ class ExpandChatSession:
         self._client_entered: bool = False
         self.features_created: int = 0
         self.created_feature_ids: list[int] = []
+        self._settings_file: Optional[Path] = None
 
     async def close(self) -> None:
         """Clean up resources and close the Claude client."""
@@ -78,6 +79,13 @@ class ExpandChatSession:
             finally:
                 self._client_entered = False
                 self.client = None
+
+        # Clean up temporary settings file
+        if self._settings_file and self._settings_file.exists():
+            try:
+                self._settings_file.unlink()
+            except Exception as e:
+                logger.warning(f"Error removing settings file: {e}")
 
     async def start(self) -> AsyncGenerator[dict, None]:
         """
@@ -111,7 +119,7 @@ class ExpandChatSession:
 
         # Create security settings file
         security_settings = {
-            "sandbox": {"enabled": False},
+            "sandbox": {"enabled": True},
             "permissions": {
                 "defaultMode": "acceptEdits",
                 "allow": [
@@ -121,6 +129,7 @@ class ExpandChatSession:
             },
         }
         settings_file = self.project_dir / ".claude_settings.json"
+        self._settings_file = settings_file
         with open(settings_file, "w") as f:
             json.dump(security_settings, f, indent=2)
 
@@ -128,8 +137,14 @@ class ExpandChatSession:
         project_path = str(self.project_dir.resolve())
         system_prompt = skill_content.replace("$ARGUMENTS", project_path)
 
-        # Create Claude SDK client
+        # Find and validate Claude CLI
         system_cli = shutil.which("claude")
+        if not system_cli:
+            yield {
+                "type": "error",
+                "content": "Claude CLI not found. Please install Claude Code."
+            }
+            return
         try:
             self.client = ClaudeSDKClient(
                 options=ClaudeAgentOptions(
@@ -268,20 +283,35 @@ class ExpandChatSession:
                                 "timestamp": datetime.now().isoformat()
                             })
 
-        # Check for feature creation block in full response
-        features_match = re.search(
+        # Check for feature creation blocks in full response (handle multiple blocks)
+        features_matches = re.findall(
             r'<features_to_create>\s*(\[[\s\S]*?\])\s*</features_to_create>',
             full_response
         )
 
-        if features_match:
-            try:
-                features_json = features_match.group(1)
-                features_data = json.loads(features_json)
+        if features_matches:
+            # Collect all features from all blocks, deduplicating by name
+            all_features: list[dict] = []
+            seen_names: set[str] = set()
 
-                if features_data and isinstance(features_data, list):
-                    # Create features via REST API
-                    created = await self._create_features_bulk(features_data)
+            for features_json in features_matches:
+                try:
+                    features_data = json.loads(features_json)
+
+                    if features_data and isinstance(features_data, list):
+                        for feature in features_data:
+                            name = feature.get("name", "")
+                            if name and name not in seen_names:
+                                seen_names.add(name)
+                                all_features.append(feature)
+                except json.JSONDecodeError as e:
+                    logger.error(f"Failed to parse features JSON block: {e}")
+                    # Continue processing other blocks
+
+            if all_features:
+                try:
+                    # Create all deduplicated features
+                    created = await self._create_features_bulk(all_features)
 
                     if created:
                         self.features_created += len(created)
@@ -294,18 +324,12 @@ class ExpandChatSession:
                         }
 
                         logger.info(f"Created {len(created)} features for {self.project_name}")
-            except json.JSONDecodeError as e:
-                logger.error(f"Failed to parse features JSON: {e}")
-                yield {
-                    "type": "error",
-                    "content": f"Failed to parse feature definitions: {str(e)}"
-                }
-            except Exception as e:
-                logger.exception("Failed to create features")
-                yield {
-                    "type": "error",
-                    "content": f"Failed to create features: {str(e)}"
-                }
+                except Exception as e:
+                    logger.exception("Failed to create features")
+                    yield {
+                        "type": "error",
+                        "content": "Failed to create features"
+                    }
 
     async def _create_features_bulk(self, features: list[dict]) -> list[dict]:
         """

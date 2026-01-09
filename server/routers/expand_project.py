@@ -161,12 +161,22 @@ async def expand_project_websocket(websocket: WebSocket, project_name: str):
                     continue
 
                 elif msg_type == "start":
-                    # Create and start a new expansion session
-                    session = await create_expand_session(project_name, project_dir)
+                    # Check if session already exists (idempotent start)
+                    existing_session = get_expand_session(project_name)
+                    if existing_session:
+                        session = existing_session
+                        await websocket.send_json({
+                            "type": "text",
+                            "content": "Resuming existing expansion session. What would you like to add?"
+                        })
+                        await websocket.send_json({"type": "response_done"})
+                    else:
+                        # Create and start a new expansion session
+                        session = await create_expand_session(project_name, project_dir)
 
-                    # Stream the initial greeting
-                    async for chunk in session.start():
-                        await websocket.send_json(chunk)
+                        # Stream the initial greeting
+                        async for chunk in session.start():
+                            await websocket.send_json(chunk)
 
                 elif msg_type == "message":
                     # User sent a message
@@ -192,7 +202,7 @@ async def expand_project_websocket(websocket: WebSocket, project_name: str):
                             logger.warning(f"Invalid attachment data: {e}")
                             await websocket.send_json({
                                 "type": "error",
-                                "content": f"Invalid attachment: {str(e)}"
+                                "content": "Invalid attachment format"
                             })
                             continue
 
@@ -236,7 +246,7 @@ async def expand_project_websocket(websocket: WebSocket, project_name: str):
         try:
             await websocket.send_json({
                 "type": "error",
-                "content": f"Server error: {str(e)}"
+                "content": "Internal server error"
             })
         except Exception:
             pass

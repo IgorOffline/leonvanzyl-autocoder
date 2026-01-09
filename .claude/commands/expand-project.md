@@ -144,7 +144,7 @@ Once the user approves, create features directly.
 
 **Then output the features in this exact JSON format (the system will parse this):**
 
-```
+```json
 <features_to_create>
 [
   {

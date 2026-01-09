@@ -302,6 +302,10 @@ export function useExpandChat({
       clearInterval(pingIntervalRef.current)
       pingIntervalRef.current = null
     }
+    if (reconnectTimeoutRef.current) {
+      clearTimeout(reconnectTimeoutRef.current)
+      reconnectTimeoutRef.current = null
+    }
     if (wsRef.current) {
       wsRef.current.close()
       wsRef.current = null

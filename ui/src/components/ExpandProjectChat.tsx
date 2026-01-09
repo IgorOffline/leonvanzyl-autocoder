@@ -121,6 +121,9 @@ export function ExpandProjectChat({
 
         setPendingAttachments((prev) => [...prev, attachment])
       }
+      reader.onerror = () => {
+        setError(`Failed to read file: ${file.name}`)
+      }
       reader.readAsDataURL(file)
     })
   }, [])
